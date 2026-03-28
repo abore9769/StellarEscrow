@@ -1136,6 +1136,31 @@ impl StellarEscrowContract {
         storage::get_template(&env, template_id)
     }
 
+    /// Get a specific version of a template's terms.
+    /// Returns `TemplateNotFound` if the version number doesn't exist.
+    pub fn get_template_version(
+        env: Env,
+        template_id: u64,
+        version: u32,
+    ) -> Result<TemplateVersion, ContractError> {
+        let template = storage::get_template(&env, template_id)?;
+        for i in 0..template.versions.len() {
+            let v = template.versions.get(i).unwrap();
+            if v.version == version {
+                return Ok(v);
+            }
+        }
+        Err(ContractError::TemplateNotFound)
+    }
+
+    /// Check whether a template is active and valid for trade creation.
+    pub fn is_template_valid(env: Env, template_id: u64) -> bool {
+        match storage::get_template(&env, template_id) {
+            Ok(t) => t.active,
+            Err(_) => false,
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Subscription Model
     // -------------------------------------------------------------------------
