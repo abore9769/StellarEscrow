@@ -5,6 +5,7 @@ mod amm;
 mod errors;
 mod events;
 mod governance;
+mod multisig;
 mod oracle;
 mod privacy;
 mod queries;
@@ -20,9 +21,10 @@ use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, E
 
 pub use errors::ContractError;
 pub use types::{
-    DisclosureGrant, DisputeResolution, Proposal, ProposalAction, ProposalStatus,
-    Subscription, SubscriptionTier, TierConfig, TemplateTerms, TemplateVersion,
-    Trade, TradePrivacy, TradeStatus, TradeTemplate, UserTier, UserTierInfo,
+    ArbitrationConfig, ArbitratorVote, DisclosureGrant, DisputeResolution, MultiSigConfig,
+    Proposal, ProposalAction, ProposalStatus, Subscription, SubscriptionTier, TierConfig,
+    TemplateTerms, TemplateVersion, Trade, TradePrivacy, TradeStatus, TradeTemplate,
+    UserTier, UserTierInfo, VotingSummary,
 };
 pub use queries::{PageParams, SortDirection, TradeFilter, TradeSortField, TradeStats};
 pub use oracle::{OracleEntry, PriceData, PriceValidation};
@@ -737,6 +739,98 @@ impl StellarEscrowContract {
     /// Query reputation stats for an arbitrator.
     pub fn get_arbitrator_reputation(env: Env, arbitrator: Address) -> ArbitratorReputation {
         storage::get_arbitrator_reputation(&env, &arbitrator)
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-Signature Arbitration
+    // -------------------------------------------------------------------------
+
+    /// Create a trade with multi-signature arbitration.
+    /// All arbitrators in `multisig_config` must be registered.
+    /// `threshold` must be > 0 and ≤ arbitrators count.
+    pub fn create_multisig_trade(
+        env: Env,
+        seller: Address,
+        buyer: Address,
+        amount: u64,
+        multisig_config: MultiSigConfig,
+        expiry_time: Option<u64>,
+        currency: Option<Address>,
+    ) -> Result<u64, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        if amount == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if multisig_config.threshold == 0
+            || multisig_config.threshold > multisig_config.arbitrators.len()
+        {
+            return Err(ContractError::InvalidMultiSigConfig);
+        }
+        for i in 0..multisig_config.arbitrators.len() {
+            let arb = multisig_config.arbitrators.get(i).unwrap();
+            if !has_arbitrator(&env, &arb) {
+                return Err(ContractError::ArbitratorNotRegistered);
+            }
+        }
+        if let Some(expiry) = expiry_time {
+            if expiry <= env.ledger().timestamp() {
+                return Err(ContractError::InvalidExpiry);
+            }
+        }
+        seller.require_auth();
+        let token = currency.unwrap_or(get_usdc_token(&env)?);
+        let trade_id = increment_trade_counter(&env)?;
+        let fee = calc_fee(&env, &seller, amount)?;
+        let trade = Trade {
+            id: trade_id,
+            seller: seller.clone(),
+            buyer: buyer.clone(),
+            amount,
+            fee,
+            arbitrator: Some(ArbitrationConfig::MultiSig(multisig_config)),
+            status: TradeStatus::Created,
+            expiry_time,
+            currency: token,
+            metadata: None,
+        };
+        save_trade(&env, trade_id, &trade);
+        events::emit_trade_created(&env, trade_id, seller, buyer, amount, trade.currency);
+        Ok(trade_id)
+    }
+
+    /// Cast a vote on a disputed multi-sig trade.
+    /// The calling arbitrator must be in the trade's panel.
+    pub fn cast_vote(
+        env: Env,
+        trade_id: u64,
+        arbitrator: Address,
+        resolution: DisputeResolution,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        multisig::cast_vote(&env, trade_id, &arbitrator, resolution)
+    }
+
+    /// Return the current voting state for a multi-sig trade.
+    pub fn get_voting_summary(env: Env, trade_id: u64) -> Result<VotingSummary, ContractError> {
+        require_initialized(&env)?;
+        multisig::voting_summary(&env, trade_id)
+    }
+
+    /// Force-resolve a multi-sig dispute after the voting window has expired
+    /// without consensus. Defaults to refunding the buyer. Admin only.
+    pub fn resolve_expired_dispute(
+        env: Env,
+        admin: Address,
+        trade_id: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        require_admin(&env, &admin)?;
+        let resolution = multisig::resolve_expired_dispute(&env, trade_id, &admin)?;
+        events::emit_multisig_expired(&env, trade_id);
+        StellarEscrowContract::execute_dispute_resolution(env, trade_id, resolution, get_trade(&env, trade_id)?)
     }
 
     /// Cancel an unfunded trade
