@@ -8,6 +8,7 @@ mod governance;
 mod oracle;
 mod privacy;
 mod queries;
+mod reputation;
 mod storage;
 mod subscription;
 mod templates;
@@ -20,8 +21,8 @@ use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, E
 
 pub use errors::ContractError;
 pub use types::{
-    DisclosureGrant, DisputeResolution, Proposal, ProposalAction, ProposalStatus,
-    Subscription, SubscriptionTier, TierConfig, TemplateTerms, TemplateVersion,
+    ArbitratorReputation, DisclosureGrant, DisputeResolution, Proposal, ProposalAction,
+    ProposalStatus, Subscription, SubscriptionTier, TierConfig, TemplateTerms, TemplateVersion,
     Trade, TradePrivacy, TradeStatus, TradeTemplate, UserTier, UserTierInfo,
 };
 pub use queries::{PageParams, SortDirection, TradeFilter, TradeSortField, TradeStats};
@@ -737,6 +738,42 @@ impl StellarEscrowContract {
     /// Query reputation stats for an arbitrator.
     pub fn get_arbitrator_reputation(env: Env, arbitrator: Address) -> ArbitratorReputation {
         storage::get_arbitrator_reputation(&env, &arbitrator)
+    }
+
+    /// Average star rating for an arbitrator, scaled ×100 (e.g. 450 = 4.50 stars).
+    pub fn get_arbitrator_avg_rating(env: Env, arbitrator: Address) -> u32 {
+        let rep = storage::get_arbitrator_reputation(&env, &arbitrator);
+        reputation::average_rating_x100(&rep)
+    }
+
+    /// Resolution rate for an arbitrator in basis points (0–10000).
+    pub fn get_arbitrator_resolution_rate(env: Env, arbitrator: Address) -> u32 {
+        let rep = storage::get_arbitrator_reputation(&env, &arbitrator);
+        reputation::resolution_rate_bps(&rep)
+    }
+
+    /// Composite reputation score (0–10000) combining resolution rate and rating.
+    pub fn get_arbitrator_score(env: Env, arbitrator: Address) -> u32 {
+        let rep = storage::get_arbitrator_reputation(&env, &arbitrator);
+        reputation::composite_score(&rep)
+    }
+
+    /// From a list of candidates, return the registered arbitrator with the
+    /// highest composite reputation score.
+    pub fn select_best_arbitrator(
+        env: Env,
+        candidates: soroban_sdk::Vec<Address>,
+    ) -> Result<Address, ContractError> {
+        require_initialized(&env)?;
+        reputation::select_best_arbitrator(&env, &candidates)
+    }
+
+    /// Return reputation records for all arbitrators in the supplied list.
+    pub fn get_arbitrator_reputations(
+        env: Env,
+        arbitrators: soroban_sdk::Vec<Address>,
+    ) -> soroban_sdk::Vec<ArbitratorReputation> {
+        reputation::get_reputations(&env, &arbitrators)
     }
 
     /// Cancel an unfunded trade
